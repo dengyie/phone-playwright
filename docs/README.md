@@ -8,6 +8,7 @@
 
 | 规格编号 | 规格主题 | 核心关注点与突破 |
 |---|---|---|
+| [**DEVELOPER_GUIDE.md**](./DEVELOPER_GUIDE.md) | **核心深度开发指南与系统内核手册** | 工业级内核实现内幕、数学模型、避坑实录与端到端实机验证架构全集 |
 | [**01-architecture-v2.md**](./specs/01-architecture-v2.md) | **总体分层拓扑与核心流** | 零强依赖单向依赖模型、快照温热缓存（1.0s TTL）、特异性评分选择器引擎、跨平台支持矩阵 |
 | [**02-input-subsystem.md**](./specs/02-input-subsystem.md) | **Tri-Channel 三阶输入子系统** | 剪贴板广播 (Channel 1) $\to$ AdbIME Base64 广播 (Channel 2) $\to$ 严格转义 ASCII (Channel 3) 自愈阶梯；确定性批量退格替换清空语义 |
 | [**03-vision-som-multimodal.md**](./specs/03-vision-som-multimodal.md) | **Set-of-Mark 视觉多模态标注** | 逻辑视口与物理点阵自适应归一化、高辨识度数字角标渲染、防遮挡避让算法、Token 紧凑压缩 |
