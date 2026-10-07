@@ -1,6 +1,6 @@
 # Phone-Playwright 生产实战踩坑与避坑手册
 
-本手册汇总了在真实硬件（如 OnePlus 7T / ColorOS、小米 MIUI、原生 Android 13/14）与网络化 ADB 部署中踩过的全部硬核生产问题与根因解法。
+本手册汇总了在真实硬件（如 OnePlus 7T / ColorOS、小米 MIUI、三星 Galaxy Fold 云手机、MuMu 模拟器与原生 Android 13/14）与网络化 ADB 部署中踩过的全部硬核生产问题与根因解法。
 
 ---
 
@@ -43,6 +43,7 @@
     3. **纯 ASCII 文本（严格转义）**：对空格（→ `%s`）与全部 Shell 元字符逐字符反斜杠转义后走 `input text`。
 - **排查指引**：
   - 收到"剪贴板写入失败"/"未在界面树中检测到输入文本"错误时，说明该 ROM 不支持 shell 端剪贴板广播，可安装 ADBKeyBoard 输入法作为替代注入通道。
+  - **三星云手机实测**：三星 Galaxy Fold 云手机（Android 13，EasyTier 组网）同样对 `cmd clipboard set text` 返回 `rc=0 + "No shell command implementation."`，云服务商在 ROM 侧关闭了 shell 剪贴板。框架按设计命中该标记、尝试粘贴→树校验 → 补发 Ctrl+V → 仍失败则抛出带建议的 `PhonePlaywrightError`，不做静默降级。
   - **MuMu/云手机专用配方**：MuMu 12 会将宿主 (Windows) 剪贴板同步至安卓侧。先在宿主写入相同文本（如 `win32clipboard.SetClipboardText(text, CF_UNICODETEXT)`），再调用 `fill()` —— 框架检测到 `cmd clipboard` 通道未实现后仍会执行粘贴，宿主同步内容即可命中终态校验。
 
 ---
@@ -63,11 +64,44 @@
 - **根因解法**：
   - `get_viewport_size()` 优先解析 `dumpsys window displays` 的 `cur=WxH`（当前旋转下的真实应用空间尺寸），不可用时回退 `wm size`；缓存带 1.0s TTL，旋转后自动刷新。滑动几何、蒸馏裁剪与无界视口诊断共用同一坐标系。
 
+### 4.3 三星云手机 `wm size` 返回 Physical 而非 Override，回退取值错尺寸
+- **真实表现**：三星 Galaxy Fold 云手机（Android 13）被云服务商强制逻辑分辨率 `Override size: 1280x720`（横屏），但 `wm size` 输出为两行：
+  ```
+  Physical size: 1080x1920
+  Override size: 1280x720
+  ```
+  旧回退逻辑 `re.search(r"(\d+)x(\d+)", output)` 取**首个**匹配即首行物理尺寸 1080x1920，与元素树实际坐标系（1280x720）不符，横屏下 distill 裁剪与 swipe 几何全部错位。
+- **根因解法**：
+  - 回退解析按关键字匹配：优先 `Override size:\s*(\d+)x(\d+)`，无则 `Physical size:\s*(\d+)x(\d+)`，二者顺序无关，避免被首行的物理尺寸劫持。
+
 ---
 
-## 5. 无线 Wi-Fi ADB 与连接漂移
+## 5. 定位器精度与控件识别
 
-### 5.1 手机锁屏或 DHCP 续租导致 ADB 端口改变
+### 5.1 `get_by_text` 贪婪命中全屏祖先容器，点击落在屏幕中心
+- **真实表现**：`page.get_by_text("应用宝").click()` 返回 `success=True`，但应用根本没有被打开；`bounding_box()` 返回整个视口 `{x:0, y:0, w:1280, h:720}`。屏幕上"应用宝"图标明明在底部。
+- **根本原因**：
+  - 语义蒸馏会把子节点文本**向上聚合**到祖先容器。桌面根 `scrollable` 节点的聚合文本包含了整屏所有图标名，因此 `text=应用宝`（子串匹配）同时命中：根 scrollable（全屏）、item（全屏）、button（真实图标）三个元素。
+  - 旧 `Selector.find_first` 按列表顺序返回**第一个**命中者 —— 恰是排在最前的全屏根容器，于是 tap 坐标落在屏幕中心空白处，"命令成功但功能未发生"。
+- **根因解法**：
+  - `Selector.find_first` 改为**特异性评分**择优：
+    1. `exact:text=` 选择器：精确等值文本（score 0）优先于子串命中（score 1）；
+    2. `text=`/默认子串选择器：命中集合中取**面积最小**（最叶子/最具体）者，`score = 1 + 元素面积`；
+    3. `@ref` / `id=` / `role=` 等无文本偏向的选择器保持原始列表顺序（score 2，并列取首个）。
+  - 修复后 `bounding_box()` 返回真实图标边界 `{x:172, y:307, w:156, h:112}`，click 真正拉起目标应用。
+
+### 5.2 `editable` 漏判 `AutoCompleteTextView`，搜索框无法被 fill 定位
+- **真实表现**：三星 Settings 顶部搜索框（真实输入控件为 `android.widget.AutoCompleteTextView`）在树里 `editable=False`，`role=input` 推断失效，`fill()` 无法定位该字段。
+- **根本原因**：
+  - 旧判定为 `focusable=true AND "edit" in class.lower()`，而 `AutoCompleteTextView` / `MultiAutoCompleteTextView` / `SearchAutoComplete` 类名**不含 "edit" 子串**，被整体漏判。
+- **根因解法**：
+  - 抽出 `_is_editable_class()`，按可编辑控件类标记集匹配：`("edittext", "autocompletetextview", "searchautocomplete")`。覆盖 `EditText` / `AppCompatEditText` / `TextInputEditText` / `AutoCompleteTextView` / `MultiAutoCompleteTextView` / `SearchAutoComplete` 全家族，`role=input` 随之正确推断。
+
+---
+
+## 6. 无线 Wi-Fi ADB 与连接漂移
+
+### 6.1 手机锁屏或 DHCP 续租导致 ADB 端口改变
 - **真实表现**：连接 `192.168.1.3:43037` 几分钟后，设备离线并报 `Connection refused`，而手机端设置里端口已经变成了 `192.168.1.3:39821`。
 - **根本原因**：
   - Android 11+ 无线调试每次重启服务或网络重连都会随机分配高位端口。

@@ -1,7 +1,11 @@
 """AndroidAdbDriver 输入通道与旋转视口单元测试。"""
 
 import pytest
-from phone_playwright.drivers.android_adb import AndroidAdbDriver
+from phone_playwright.drivers.android_adb import (
+    AndroidAdbDriver,
+    _is_editable_class,
+    parse_android_xml_hierarchy,
+)
 from phone_playwright.models.exceptions import PhonePlaywrightError
 from phone_playwright.models.geometry import Rect
 from phone_playwright.models.schema import RawNode
@@ -59,6 +63,21 @@ async def test_viewport_falls_back_to_wm_size():
 
 
 @pytest.mark.asyncio
+async def test_viewport_prefers_override_size_over_physical():
+    """wm size 同时含 Physical 与 Override 时，应取 Override (逻辑分辨率)。
+
+    三星云手机/模拟器常强制逻辑分辨率 (Override size) 而非物理面板尺寸，
+    旧 re.search 取到首行物理尺寸导致横屏视口错位。
+    """
+    driver = ScriptedAdbDriver()
+    driver.responses["shell wm size"] = "Physical size: 1080x1920\nOverride size: 1280x720"
+
+    size = await driver.get_viewport_size()
+
+    assert size == (1280, 720)
+
+
+@pytest.mark.asyncio
 async def test_type_text_ascii_uses_escaped_input_text():
     driver = ScriptedAdbDriver()
 
@@ -104,3 +123,37 @@ async def test_type_text_unicode_no_ctrlv_retry_when_channel_unsupported():
 
     # 通道未实现时不补发 Ctrl+V (避免把宿主剪贴板旧内容重复粘入)
     assert ("shell", "input", "keycombination", "113", "47") not in driver.commands
+
+
+def test_editable_class_covers_autocompletetextview_family():
+    """可编辑控件判定须覆盖类名不含 "edit" 的 AutoCompleteTextView 家族。
+
+    三星 SearchView 的真实输入控件为 android.widget.AutoCompleteTextView，
+    仅查 "edit" 子串会漏判，导致 fill / role=input 无法定位输入框。
+    """
+    assert _is_editable_class("android.widget.EditText")
+    assert _is_editable_class("android.widget.AppCompatEditText")
+    assert _is_editable_class("android.widget.AutoCompleteTextView")
+    assert _is_editable_class("android.widget.MultiAutoCompleteTextView")
+    assert _is_editable_class("androidx.appcompat.widget.SearchView$SearchAutoComplete")
+    # 非可编辑控件不得误判
+    assert not _is_editable_class("android.widget.TextView")
+    assert not _is_editable_class("android.widget.Button")
+    assert not _is_editable_class("android.widget.SearchView")
+
+
+def test_xml_hierarchy_marks_autocompletetextview_editable():
+    """端到端: uiautomator XML 中 AutoCompleteTextView 应被解析为 editable。"""
+    xml = (
+        '<?xml version="1.0" encoding="UTF-8"?>'
+        "<hierarchy rotation=\"0\">"
+        '<node class="android.widget.AutoCompleteTextView" focusable="true" '
+        'clickable="true" text="搜索设置项" bounds="[142,57][684,111]" />'
+        "</hierarchy>"
+    )
+
+    root = parse_android_xml_hierarchy(xml, default_width=720, default_height=1280)
+
+    field = root.children[0]
+    assert field.editable is True
+    assert field.text == "搜索设置项"

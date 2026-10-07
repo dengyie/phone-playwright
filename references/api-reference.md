@@ -32,7 +32,7 @@ with SyncPhonePlaywright() as pw:
 |---|---|---|---|
 | `snapshot(include_screenshot=False)` | `include_screenshot: bool` | `PageSnapshot` | 获取当前屏幕紧凑语义快照，自动温热 1.0s 执行缓存。若参数为 True，回填 Base64 截图 |
 | `locator(selector)` | `selector: str` | `PhoneLocator` | 构造惰性定位器对象 |
-| `get_by_text(text, exact=False)` | `text: str, exact: bool` | `PhoneLocator` | 按显示文本或内容描述定位 |
+| `get_by_text(text, exact=False)` | `text: str, exact: bool` | `PhoneLocator` | 按显示文本或内容描述定位；多命中时按特异性择优（exact 精确等值优先；子串匹配取面积最小/最叶子者，避免命中聚合了全屏文本的祖先容器） |
 | `get_by_role(role, name=None)` | `role: str, name: str \| None` | `PhoneLocator` | 按语义角色（Button, Input, CheckBox 等）定位 |
 | `get_by_test_id(test_id)` | `test_id: str` | `PhoneLocator` | 按 Android resource-id 定位 |
 | `swipe(direction, distance_ratio=0.5)` | `direction: Literal["up","down","left","right"], distance_ratio: float` | `None` | 执行全屏相对距离滑动手势，立即清空温热缓存 |

@@ -43,7 +43,7 @@ phone-playwright/
 │   ├── architecture.md               # 完整分层架构、状态机模型与优化算法剖析
 │   ├── api-reference.md              # Async / Sync Page & Locator API 全量字典
 │   └── pitfalls.md                   # 生产实战硬核避坑手册 (Dump延时/端口漂移/中文输入)
-└── tests/                            # 自动化单元测试与类型守卫套件 (34 项全绿)
+└── tests/                            # 自动化单元测试与类型守卫套件 (42 项全绿)
 ```
 
 ---

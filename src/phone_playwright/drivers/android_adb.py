@@ -133,7 +133,12 @@ class AndroidAdbDriver(BaseDriver):
             pass
 
         output = await self._run_adb("shell", "wm", "size")
-        match = re.search(r"(\d+)x(\d+)", output)
+        # 优先解析 Override size (模拟器/云手机常强制逻辑分辨率)，其优先级高于
+        # 未旋转的 Physical size；两者顺序无关地按关键字匹配，避免 re.search 取到
+        # 首行的物理尺寸而对横屏/缩放设备给出错误视口。
+        override = re.search(r"Override size:\s*(\d+)x(\d+)", output)
+        physical = re.search(r"Physical size:\s*(\d+)x(\d+)", output)
+        match = override or physical
         size = (int(match.group(1)), int(match.group(2))) if match else (1080, 2400)
         self._cached_viewport = size
         self._cached_viewport_at = now
@@ -324,6 +329,28 @@ def _parse_bounds_str(bounds_str: str) -> Rect:
     )
 
 
+# 类名可能不直接含 "edit" 的可编辑控件。
+# "edittext" 覆盖 EditText / AppCompatEditText / TextInputEditText / ExtractEditText 等；
+# "autocompletetextview" 覆盖 AutoCompleteTextView / MultiAutoCompleteTextView 等；
+# "searchautocomplete" 覆盖 SearchAutoComplete (SearchView 内嵌)。
+_EDITABLE_CLASS_MARKERS = (
+    "edittext",
+    "autocompletetextview",
+    "searchautocomplete",
+)
+
+
+def _is_editable_class(class_name: str) -> bool:
+    """判定控件类名是否属于可编辑输入控件。
+
+    不能只查 "edit" 子串 —— 三星 SearchView 的真实输入控件类名是
+    android.widget.AutoCompleteTextView (不含 "edit")，会导致输入框漏判，
+    使 fill / role=input 无法定位到该字段。
+    """
+    cls_lower = class_name.lower()
+    return any(marker in cls_lower for marker in _EDITABLE_CLASS_MARKERS)
+
+
 def parse_android_xml_hierarchy(
     xml_text: str, default_width: int = 1080, default_height: int = 2400
 ) -> RawNode:
@@ -342,7 +369,7 @@ def parse_android_xml_hierarchy(
             desc=elem.attrib.get("content-desc") or None,
             bounds=bounds_rect,
             clickable=elem.attrib.get("clickable", "false").lower() == "true",
-            editable=elem.attrib.get("focusable", "false").lower() == "true" and "edit" in elem.attrib.get("class", "").lower(),
+            editable=_is_editable_class(elem.attrib.get("class", "")),
             scrollable=elem.attrib.get("scrollable", "false").lower() == "true",
             checkable=elem.attrib.get("checkable", "false").lower() == "true",
             enabled=elem.attrib.get("enabled", "true").lower() == "true",

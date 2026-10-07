@@ -16,19 +16,46 @@ from phone_playwright.models.schema import CompactElement
 class Selector:
     """已解析的选择器对象。"""
 
-    def __init__(self, raw: str, matcher: Callable[[CompactElement], bool]) -> None:
+    def __init__(
+        self,
+        raw: str,
+        matcher: Callable[[CompactElement], bool],
+        exact_text: str | None = None,
+        substring_text: str | None = None,
+    ) -> None:
         self.raw = raw
         self.matcher = matcher
+        self.exact_text = exact_text
+        self.substring_text = substring_text
 
     def match(self, element: CompactElement) -> bool:
         return self.matcher(element)
 
     def find_first(self, elements: list[CompactElement]) -> CompactElement | None:
-        """从紧凑元素列表中查找首个满足匹配的元素。"""
+        """返回最具体的首个匹配。
+
+        文本类选择器常因祖先容器聚合了子节点文本而形成"子串含"匹配
+        (如全屏根 scrollable 的文本包含"应用宝")，若按列表顺序取首个会命中
+        全屏容器，导致点击/取边界落在屏幕中心而非目标图标。此处按特异性评分：
+        1. exact_text 选择器：精确等值文本优先于子串命中；
+        2. substring_text 选择器：命中集合中取面积最小 (最叶子/最具体) 者；
+        3. @ref / id / role 等无文本偏向的选择器保持原始列表顺序。
+        """
+        best: CompactElement | None = None
+        best_score: float | None = None
         for el in elements:
-            if self.match(el):
-                return el
-        return None
+            if not self.match(el):
+                continue
+            if self.exact_text is not None:
+                score = 0.0 if el.text == self.exact_text else 1.0
+            elif self.substring_text is not None:
+                area = (el.bounds.right - el.bounds.left) * (el.bounds.bottom - el.bounds.top)
+                score = 1.0 + float(area)
+            else:
+                score = 2.0
+            if best is None or score < best_score:
+                best, best_score = el, score
+        return best
 
     def __str__(self) -> str:
         return self.raw
@@ -60,6 +87,7 @@ def parse_selector(selector_str: str) -> Selector:
         return Selector(
             raw=s,
             matcher=lambda el: el.text == target_text,
+            exact_text=target_text,
         )
 
     if s.startswith("text="):
@@ -67,6 +95,7 @@ def parse_selector(selector_str: str) -> Selector:
         return Selector(
             raw=s,
             matcher=lambda el: target_text in el.text,
+            substring_text=target_text,
         )
 
     # 4. 匹配 role=xxx[name=yyy] 或 role=xxx
@@ -91,4 +120,5 @@ def parse_selector(selector_str: str) -> Selector:
     return Selector(
         raw=s,
         matcher=lambda el: fallback_text in el.text,
+        substring_text=fallback_text,
     )
