@@ -103,7 +103,7 @@ async def test_type_text_unicode_raises_when_text_never_lands():
     driver = ScriptedAdbDriver()
     driver.tree_texts = []  # 校验始终找不到文本
 
-    with pytest.raises(PhonePlaywrightError, match="未在界面树中检测到输入文本"):
+    with pytest.raises(PhonePlaywrightError, match="非 ASCII 文本注入失败"):
         await driver.type_text("中文输入")
 
     # 通道正常的场景下应补发 Ctrl+V (CTRL_LEFT=113, V=47)
@@ -118,7 +118,7 @@ async def test_type_text_unicode_no_ctrlv_retry_when_channel_unsupported():
     )
     driver.tree_texts = []
 
-    with pytest.raises(PhonePlaywrightError, match="未在界面树中检测到输入文本"):
+    with pytest.raises(PhonePlaywrightError, match="非 ASCII 文本注入失败"):
         await driver.type_text("无线局域网设置")
 
     # 通道未实现时不补发 Ctrl+V (避免把宿主剪贴板旧内容重复粘入)

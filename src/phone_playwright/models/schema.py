@@ -65,6 +65,17 @@ class PageSnapshot(BaseModel):
     viewport_height: int = Field(..., description="物理视口高度")
     elements: list[CompactElement] = Field(default_factory=list, description="视口内紧凑元素列表")
     screenshot_base64: str | None = Field(default=None, description="物理屏幕截图 Base64 数据 (可选)")
+    annotated_screenshot_base64: str | None = Field(
+        default=None, description="带有 Set-of-Mark (SoM) 角标编号的高对比度标注快照 Base64 数据 (可选)"
+    )
+
+    def to_multimodal_prompt(self) -> dict[str, str]:
+        """构建包含 SoM 标注图 (优先) 或原图与紧凑 Markdown 列表的多模态输入 Payload。"""
+        img = self.annotated_screenshot_base64 or self.screenshot_base64 or ""
+        return {
+            "image_base64": img,
+            "markdown_tree": self.to_markdown(),
+        }
 
     def to_markdown(self) -> str:
         """为 LLM 生成最高信息密度、最少 Token 的 Markdown 清单。"""

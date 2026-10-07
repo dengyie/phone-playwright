@@ -98,6 +98,10 @@ def test_sync_playwright_workflow(monkeypatch):
         page.press_home()
         assert driver_instance.pressed_keys == ["back", "home"]
 
+        # 5. 验证快捷定位器 get_by_test_id
+        test_loc = device.get_by_test_id("com.test:id/btn")
+        assert test_loc.selector == "id=com.test:id/btn"
+
 
 def test_sync_playwright_locator_warm_cache_reuse(monkeypatch):
     class CountingDriver(DummySyncDriver):

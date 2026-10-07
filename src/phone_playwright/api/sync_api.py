@@ -143,6 +143,9 @@ class SyncPhonePage:
         sel = f"role={role}[name={name}]" if name else f"role={role}"
         return self.locator(sel)
 
+    def get_by_test_id(self, test_id: str) -> SyncPhoneLocator:
+        return self.locator(f"id={test_id}")
+
     def dump_raw_tree(self) -> Any:
         return self._loop_thread.run(self._async.dump_raw_tree())
 

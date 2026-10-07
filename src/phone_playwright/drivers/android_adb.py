@@ -7,6 +7,7 @@
 
 from __future__ import annotations
 import asyncio
+import base64
 import re
 import shlex
 import time
@@ -42,6 +43,8 @@ _CLIPBOARD_UNSUPPORTED_MARKERS: tuple[str, ...] = (
     "usage: ",
 )
 
+_ADB_KEYBOARD_IME = "com.android.adbkeyboard/.AdbIME"
+
 
 class AndroidAdbDriver(BaseDriver):
     """基于 ADB 的 Android 驱动实现。"""
@@ -53,6 +56,10 @@ class AndroidAdbDriver(BaseDriver):
         self.adb_path = adb_path
         self._cached_viewport: tuple[int, int] | None = None
         self._cached_viewport_at: float = 0.0
+        self._original_ime: str | None = None
+        self._current_ime: str | None = None
+        self._adb_ime_checked: bool = False
+        self._adb_ime_available: bool = False
 
     def _cmd_prefix(self) -> list[str]:
         if self.device_id:
@@ -110,8 +117,51 @@ class AndroidAdbDriver(BaseDriver):
         await self.get_viewport_size()
 
     async def disconnect(self) -> None:
-        """释放资源 (清理本地句柄，不对全局 adb server 执行强硬断开以保护多会话)。"""
+        """释放资源 (清理本地句柄，还原输入法，不对全局 adb server 执行强硬断开以保护多会话)。"""
         self._cached_viewport = None
+        if self._original_ime and self._current_ime == _ADB_KEYBOARD_IME:
+            try:
+                await self._run_adb("shell", "ime", "set", self._original_ime)
+                self._current_ime = self._original_ime
+            except Exception:
+                pass
+
+    async def _ensure_adb_ime(self) -> bool:
+        """检查并确保 AdbIME 处于激活状态，支持自动切换与退出还原。"""
+        if not self._adb_ime_checked:
+            try:
+                imes = await self._run_adb("shell", "ime", "list", "-a")
+                self._adb_ime_available = _ADB_KEYBOARD_IME.split("/")[0] in imes
+            except Exception:
+                self._adb_ime_available = False
+            self._adb_ime_checked = True
+
+        if not self._adb_ime_available:
+            return False
+
+        if self._current_ime != _ADB_KEYBOARD_IME:
+            try:
+                cur = await self._run_adb("shell", "settings", "get", "secure", "default_input_method")
+                if cur and "/" in cur and not self._original_ime:
+                    self._original_ime = cur.strip()
+                await self._run_adb("shell", "ime", "enable", _ADB_KEYBOARD_IME)
+                await self._run_adb("shell", "ime", "set", _ADB_KEYBOARD_IME)
+                self._current_ime = _ADB_KEYBOARD_IME
+            except Exception:
+                return False
+        return True
+
+    async def _type_via_adb_ime(self, text: str) -> bool:
+        """通道 2: 基于 AdbIME 广播通道注入 UTF-8 / Base64 文本。"""
+        if not await self._ensure_adb_ime():
+            return False
+        b64_str = base64.b64encode(text.encode("utf-8")).decode("ascii")
+        try:
+            await self._run_adb("shell", "am", "broadcast", "-a", "ADB_INPUT_B64", "--es", "msg", b64_str)
+            await asyncio.sleep(0.3)
+            return True
+        except Exception:
+            return False
 
     async def get_viewport_size(self) -> tuple[int, int]:
         now = time.monotonic()
@@ -169,55 +219,50 @@ class AndroidAdbDriver(BaseDriver):
         await self._run_adb("shell", "input", "keyevent", *keycodes)
 
     async def type_text(self, text: str) -> None:
-        """安全键入文本。针对包含空格与元字符的 ASCII 序列做严格转义，防止注入。"""
+        """安全键入文本。具备三通道自愈阶梯 (Tri-Channel Input Fallback Chain)。"""
         if not text:
             return
 
         has_non_ascii = any(ord(c) > 127 for c in text)
         if has_non_ascii:
-            # Unicode / 中文文本唯一可靠通道：剪贴板 + 粘贴键码。
-            # 绝不允许静默降级到 input text —— 它会把非 ASCII 字符注入成乱码或直接丢字。
+            # 优先尝试通道 1: 剪贴板 + KEYCODE_PASTE (279)
+            clipboard_failed = False
             safe_text = shlex.quote(text)
             try:
                 response = await self._run_adb("shell", f"cmd clipboard set text {safe_text}")
-            except Exception as exc:
-                raise PhonePlaywrightError(
-                    f"剪贴板写入失败，无法安全输入非 ASCII 文本 ({len(text)} 字符)",
-                    suggestion="该设备可能不支持 'cmd clipboard' 广播；请安装 ADBKeyBoard 输入法或改用 ASCII 文本",
-                ) from exc
-            lowered = response.lower()
-            # 模拟器/云手机常见: rc=0 但通道未实现, 剪贴板实际未被写入。
-            # 不在此处直接报错 —— 继续尝试粘贴, 由终态校验裁决
-            # (宿主剪贴板同步型云手机仍可经宿主侧内容完成注入)。
-            unsupported = any(marker in lowered for marker in _CLIPBOARD_UNSUPPORTED_MARKERS)
-            try:
-                await self._run_adb("shell", "input", "keyevent", "279")
-            except Exception as exc:
-                raise PhonePlaywrightError(
-                    "剪贴板已写入但粘贴键码 (KEYCODE_PASTE=279) 下发失败",
-                    suggestion="请确认焦点位于可编辑输入框内，或检查设备 ROM 对 KEYCODE_PASTE 的支持",
-                ) from exc
-
-            # 终态校验: 确认文本真实落进界面树。通道失效时在此显式失败
-            # 而非静默空转 (含宿主剪贴板同步型云手机: 宿主侧需已写入相同内容)。
-            await asyncio.sleep(0.3)
-            if not await self._tree_contains_text(text):
+                lowered = response.lower()
+                unsupported = any(marker in lowered for marker in _CLIPBOARD_UNSUPPORTED_MARKERS)
                 if not unsupported:
-                    # 剪贴板通道正常但粘贴未生效: 补发 Ctrl+V 组合键重试
+                    await self._run_adb("shell", "input", "keyevent", "279")
+                    await asyncio.sleep(0.3)
+                    if await self._tree_contains_text(text):
+                        return
+                    # 尝试 Ctrl+V 组合键补发
                     try:
                         await self._run_adb("shell", "input", "keycombination", "113", "47")
+                        await asyncio.sleep(0.3)
+                        if await self._tree_contains_text(text):
+                            return
                     except Exception:
                         pass
-                    await asyncio.sleep(0.3)
-                if not await self._tree_contains_text(text):
-                    raise PhonePlaywrightError(
-                        "剪贴板注入后未在界面树中检测到输入文本",
-                        suggestion=(
-                            "设备剪贴板通道不可用：请安装 ADBKeyBoard 输入法、"
-                            "确认宿主剪贴板同步已开启并预先写入相同内容，或改用 ASCII 文本"
-                        ),
-                    )
-            return
+                clipboard_failed = True
+            except Exception:
+                clipboard_failed = True
+
+            # 剪贴板失败或不可用，自动降级到通道 2: AdbIME 广播通道 (ADB_INPUT_B64)
+            if clipboard_failed or unsupported:
+                success_ime = await self._type_via_adb_ime(text)
+                if success_ime and await self._tree_contains_text(text):
+                    return
+
+            raise PhonePlaywrightError(
+                "非 ASCII 文本注入失败 (剪贴板通道与 AdbIME 广播通道均未能成功写入目标输入框)",
+                suggestion=(
+                    "请确认焦点已正确位于可编辑输入框内，或检查设备是否预装并启用了 ADBKeyBoard 输入法"
+                ),
+            )
+
+        # 安全 ASCII 字符注入路径：严格对每个字符做输入法转义 (空格 -> %s, Shell 元字符 -> 反斜杠转义)
 
         # 安全 ASCII 字符注入路径：严格对每个字符做输入法转义 (空格 -> %s, Shell 元字符 -> 反斜杠转义)
         tokens: list[str] = []
@@ -317,8 +362,8 @@ class AndroidAdbDriver(BaseDriver):
 
 
 def _parse_bounds_str(bounds_str: str) -> Rect:
-    """解析形如 '[0,0][1080,2400]' 的 Android 坐标串。"""
-    match = re.match(r"\[(\d+),(\d+)\]\[(\d+),(\d+)\]", bounds_str)
+    """解析形如 '[0,0][1080,2400]' 或包含负数坐标 '[-50,100][500,300]' 的 Android 坐标串。"""
+    match = re.match(r"\[(-?\d+),(-?\d+)\]\[(-?\d+),(-?\d+)\]", bounds_str)
     if not match:
         return Rect(left=0, top=0, right=0, bottom=0)
     return Rect(

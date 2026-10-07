@@ -42,7 +42,7 @@ class Selector:
         3. @ref / id / role 等无文本偏向的选择器保持原始列表顺序。
         """
         best: CompactElement | None = None
-        best_score: float | None = None
+        best_score: float = float("inf")
         for el in elements:
             if not self.match(el):
                 continue
@@ -53,7 +53,7 @@ class Selector:
                 score = 1.0 + float(area)
             else:
                 score = 2.0
-            if best is None or score < best_score:
+            if score < best_score:
                 best, best_score = el, score
         return best
 

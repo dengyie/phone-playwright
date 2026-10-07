@@ -8,7 +8,7 @@ AsyncPhonePlaywright -> AsyncPhoneDevice -> AsyncPhonePage -> PhoneLocator
 from __future__ import annotations
 import base64
 import time
-from typing import AsyncIterator, Literal
+from typing import Any, AsyncIterator, Literal
 from phone_playwright.drivers.base import BaseDriver
 from phone_playwright.core.pruner import SemanticPruner
 from phone_playwright.core.state_machine import ActionabilityEngine
@@ -93,6 +93,10 @@ class AsyncPhonePage:
         """语义快捷定位器: 按无障碍角色与标签定位。"""
         sel = f"role={role}[name={name}]" if name else f"role={role}"
         return self.locator(sel)
+
+    def get_by_test_id(self, test_id: str) -> PhoneLocator:
+        """快捷定位器: 按资源 ID / 测试 ID 定位。"""
+        return self.locator(f"id={test_id}")
 
     async def screenshot(self) -> bytes:
         """抓取物理屏幕图像数据。"""

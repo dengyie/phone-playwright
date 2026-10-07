@@ -101,6 +101,7 @@ async def test_fleet_manager_aliases_and_caching(monkeypatch):
 
     # 别名与实际 IP:Port 应当命中同一个驱动单例实例
     assert driver1 is driver2
+    assert isinstance(driver1, DummyFleetDriver)
     assert driver1.device_id == "192.168.1.3:43037"
     assert driver1.connected is True
 
@@ -139,7 +140,7 @@ async def test_watchdog_monitoring():
 
 
 @pytest.mark.asyncio
-async def test_watchdog_port_drift_migration_atomic():
+async def test_watchdog_port_drift_migration_atomic(monkeypatch):
     """验证看门狗在感知到端口漂移自愈连接成功后，原子迁移内部 monitored_devices 键，避免死循环。"""
     reconnect_events: list[tuple[str, str]] = []
 
@@ -157,10 +158,10 @@ async def test_watchdog_port_drift_migration_atomic():
     watchdog.register(old_dev, alias="oneplus-7t")
 
     # 模拟 mDNS 返回新端口
-    async def fake_find_port(ip: str):
+    async def fake_find_port(target_ip: str, timeout_s: float = 3.0) -> int | None:
         return 55555
 
-    watchdog.mdns.find_port_for_ip = fake_find_port  # type: ignore[method-assign]
+    monkeypatch.setattr(watchdog.mdns, "find_port_for_ip", fake_find_port)
 
     # 模拟 adb connect 成功输出
     async def fake_proc(*args, **kwargs):

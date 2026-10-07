@@ -16,6 +16,8 @@ from phone_playwright.models.exceptions import (
     OffscreenElementError,
 )
 
+from phone_playwright.models.trace import TraceActionRecord, TraceManifest
+
 __all__ = [
     "Rect",
     "RawNode",
@@ -25,6 +27,8 @@ __all__ = [
     "ActionPayload",
     "ActionResult",
     "ActionVerb",
+    "TraceActionRecord",
+    "TraceManifest",
     "PhonePlaywrightError",
     "DeviceOfflineError",
     "ActionabilityTimeoutError",

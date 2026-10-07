@@ -123,7 +123,8 @@ class ActionabilityEngine:
                 continue
 
             # 3. Visible & 视口检查：若由于进场动画导致暂未进入视口，继续等待
-            if not target_el.bounds.intersects(viewport):
+            inter = target_el.bounds.intersection(viewport)
+            if inter is None or inter.width < 4 or inter.height < 4:
                 stable_hits = 0
                 await asyncio.sleep(self.poll_interval_s)
                 continue
@@ -157,8 +158,9 @@ class ActionabilityEngine:
                     time_taken_ms=elapsed_ms,
                 )
 
-            # 6. 计算安全物理中心坐标并下发物理动作 (下发后立即清除短缓存)
-            cx, cy = target_el.bounds.center
+            # 6. 计算安全物理中心坐标 (优先使用视口相交区域中心，防止部分出界导致点击越界) 并下发物理动作
+            click_bounds = inter if inter is not None else target_el.bounds
+            cx, cy = click_bounds.center
             self.invalidate_cache()
 
             if verb == "click":

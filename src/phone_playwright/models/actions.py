@@ -5,7 +5,19 @@ from typing import Literal
 from pydantic import BaseModel, Field
 from phone_playwright.models.geometry import Rect
 
-ActionVerb = Literal["click", "fill", "swipe", "press_key", "tap_coord", "hover", "wait_for"]
+ActionVerb = Literal[
+    "click",
+    "fill",
+    "swipe",
+    "press_key",
+    "tap_coord",
+    "hover",
+    "wait_for",
+    "drag_to",
+    "pinch_in",
+    "pinch_out",
+    "swipe_path",
+]
 
 
 class ActionPayload(BaseModel):
