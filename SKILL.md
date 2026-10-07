@@ -39,6 +39,9 @@ phone-playwright/
 ├── scripts/                          # 开箱即用便捷脚本
 │   ├── cli.py                        # 全功能 CLI 交互式与单步命令工具 (含 REPL/MCP)
 │   └── inspect_ui.py                 # 快速 UI 视口元素检查与截图导出工具
+├── docs/                             # v2 进阶系统与子系统详细工程规格书
+│   ├── README.md                     # 规格书体系导航与开发原则
+│   └── specs/                        # 输入子系统/SoM视觉/手势/CDP/断言/Trace 规格
 ├── references/                       # 生产架构与深度手册
 │   ├── architecture.md               # 完整分层架构、状态机模型与优化算法剖析
 │   ├── api-reference.md              # Async / Sync Page & Locator API 全量字典
