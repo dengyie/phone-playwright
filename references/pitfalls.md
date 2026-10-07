@@ -37,10 +37,13 @@
 - **根本原因**：
   - `input text` 仅仅是将字符映射为底层 Linux Key Event。它不仅无法处理非 ASCII 编码的 Unicode 中文字符，且命令行中的 `&`, `|`, `'`, `"`, ` ` 会被 Shell 解释器直接转义或截断。
 - **根因解法**：
-  - Phone-Playwright 在 AndroidDriver 中实现了双阶安全输入通道：
-    1. **非 ASCII 文本（唯一通道，硬失败策略）**：通过 `cmd clipboard set text` 广播写入系统剪贴板，再下发粘贴键码（`KEYCODE_PASTE = 279`）。对中英文、Emoji 及任意特殊字符 100% 免疫。**若剪贴板写入或粘贴下发失败，框架显式抛出 `PhonePlaywrightError` 并附带修复建议，绝不静默降级到 `input text`** —— 静默降级会把中文注入成乱码/丢字，对上层 Agent 造成"输入成功但内容错误"的假阳性。
-    2. **纯 ASCII 文本（严格转义）**：对空格（→ `%s`）与全部 Shell 元字符逐字符反斜杠转义后走 `input text`。
-- **排查指引**：收到"剪贴板写入失败"错误时，说明该 ROM 不支持 shell 端剪贴板广播（部分原生 Android 10+ 限制后台剪贴板），可安装 ADBKeyBoard 输入法作为替代注入通道。
+  - Phone-Playwright 在 AndroidDriver 中实现了带终态校验的安全输入通道：
+    1. **非 ASCII 文本（唯一通道，硬失败策略）**：通过 `cmd clipboard set text` 广播写入系统剪贴板，再下发粘贴键码（`KEYCODE_PASTE = 279`）。对中英文、Emoji 及任意特殊字符 100% 免疫。
+    2. **注入终态校验**：粘贴后主动在无障碍树中检索目标文本。部分 ROM/模拟器（如 MuMu）对 `cmd clipboard` 返回 rc=0 + "No shell command implementation."（静默空转），或粘贴键码未被应用——此时若通道仍可用会补发一次 `Ctrl+V` 组合键重试，仍失败则显式抛出 `PhonePlaywrightError` 并附带修复建议，**绝不静默降级到 `input text`**（那会把中文注入成乱码/丢字，造成"输入成功但内容错误"的假阳性）。
+    3. **纯 ASCII 文本（严格转义）**：对空格（→ `%s`）与全部 Shell 元字符逐字符反斜杠转义后走 `input text`。
+- **排查指引**：
+  - 收到"剪贴板写入失败"/"未在界面树中检测到输入文本"错误时，说明该 ROM 不支持 shell 端剪贴板广播，可安装 ADBKeyBoard 输入法作为替代注入通道。
+  - **MuMu/云手机专用配方**：MuMu 12 会将宿主 (Windows) 剪贴板同步至安卓侧。先在宿主写入相同文本（如 `win32clipboard.SetClipboardText(text, CF_UNICODETEXT)`），再调用 `fill()` —— 框架检测到 `cmd clipboard` 通道未实现后仍会执行粘贴，宿主同步内容即可命中终态校验。
 
 ---
 
@@ -54,6 +57,11 @@
 - **根因解法**：
   - **无界虚拟视口事后分析**：超时发生后，引擎使用 $1,000,000 \times 1,000,000$ 的无界视口重新评估。若在 DOM 树中命中但在物理视口外，精确抛出 `OffscreenElementError`。
   - **链式滚动**：支持 `await page.get_by_text("关于本机").scroll_into_view().click()`，动态滚动并自动对准视口。
+
+### 4.2 模拟器/云手机横屏时坐标与滑动几何错位 90°
+- **真实表现**：MuMu 等模拟器/云手机运行横屏应用（如浏览器）时，`wm size` 仍返回竖屏物理面板尺寸（`Physical size: 900x1600`），而元素树坐标处于当前旋转空间（1600x900）。方向滑动 `swipe(direction="up")` 的坐标越界（y > 900），语义蒸馏的视口裁剪也随之失真。
+- **根因解法**：
+  - `get_viewport_size()` 优先解析 `dumpsys window displays` 的 `cur=WxH`（当前旋转下的真实应用空间尺寸），不可用时回退 `wm size`；缓存带 1.0s TTL，旋转后自动刷新。滑动几何、蒸馏裁剪与无界视口诊断共用同一坐标系。
 
 ---
 

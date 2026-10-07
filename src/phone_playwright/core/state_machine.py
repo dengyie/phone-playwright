@@ -171,9 +171,16 @@ class ActionabilityEngine:
                     time_taken_ms=elapsed_ms,
                 )
             elif verb == "fill":
-                # Playwright 契约：点击聚焦输入框 -> 注入新文本
+                # Playwright 契约：点击聚焦输入框 -> 清空 -> 注入新文本
                 await self.driver.tap(cx, cy)
                 await asyncio.sleep(0.05)
+                clear_text = getattr(self.driver, "clear_text", None)
+                if callable(clear_text):
+                    try:
+                        await clear_text()
+                        await asyncio.sleep(0.05)
+                    except Exception:
+                        pass
                 text_to_type = value or ""
                 await self.driver.type_text(text_to_type)
                 return ActionResult(

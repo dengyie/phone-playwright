@@ -9,6 +9,7 @@ from __future__ import annotations
 import asyncio
 import re
 import shlex
+import time
 import xml.etree.ElementTree as ET
 from phone_playwright.drivers.base import BaseDriver
 from phone_playwright.models.geometry import Rect
@@ -31,14 +32,27 @@ _ANDROID_KEYCODES: dict[str, int] = {
     "search": 84,
 }
 
+# 部分 ROM / 云手机 (如 MuMu) 对未实现的 shell 子命令返回 rc=0 + 提示文本,
+# 必须按输出内容判定剪贴板通道不可用, 否则注入会静默空转。
+_CLIPBOARD_UNSUPPORTED_MARKERS: tuple[str, ...] = (
+    "no shell command implementation",
+    "unknown command",
+    "not implemented",
+    "bad usage",
+    "usage: ",
+)
+
 
 class AndroidAdbDriver(BaseDriver):
     """基于 ADB 的 Android 驱动实现。"""
+
+    _VIEWPORT_CACHE_TTL_S: float = 1.0
 
     def __init__(self, device_id: str, adb_path: str = "adb") -> None:
         super().__init__(device_id)
         self.adb_path = adb_path
         self._cached_viewport: tuple[int, int] | None = None
+        self._cached_viewport_at: float = 0.0
 
     def _cmd_prefix(self) -> list[str]:
         if self.device_id:
@@ -100,18 +114,30 @@ class AndroidAdbDriver(BaseDriver):
         self._cached_viewport = None
 
     async def get_viewport_size(self) -> tuple[int, int]:
-        if self._cached_viewport:
+        now = time.monotonic()
+        if self._cached_viewport and (now - self._cached_viewport_at < self._VIEWPORT_CACHE_TTL_S):
             return self._cached_viewport
+
+        # 优先读取当前旋转下的真实应用空间尺寸 (cur=WxH)。
+        # wm size 返回的是未旋转物理面板 (init=)，横屏/模拟器旋转时会与
+        # 无障碍树坐标系相差 90°，导致蒸馏裁剪与方向滑动的几何全部错位。
+        try:
+            display_info = await self._run_adb("shell", "dumpsys", "window", "displays", timeout=8.0)
+            match = re.search(r"cur=(\d+)x(\d+)", display_info)
+            if match:
+                size = (int(match.group(1)), int(match.group(2)))
+                self._cached_viewport = size
+                self._cached_viewport_at = now
+                return size
+        except Exception:
+            pass
 
         output = await self._run_adb("shell", "wm", "size")
         match = re.search(r"(\d+)x(\d+)", output)
-        if not match:
-            self._cached_viewport = (1080, 2400)
-            return self._cached_viewport
-
-        w, h = int(match.group(1)), int(match.group(2))
-        self._cached_viewport = (w, h)
-        return self._cached_viewport
+        size = (int(match.group(1)), int(match.group(2))) if match else (1080, 2400)
+        self._cached_viewport = size
+        self._cached_viewport_at = now
+        return size
 
     async def dump_raw_tree(self) -> RawNode:
         """从手机 dump UI 层次结构并解析为 RawNode 多叉树。"""
@@ -127,6 +153,16 @@ class AndroidAdbDriver(BaseDriver):
     async def tap(self, x: int, y: int) -> None:
         await self._run_adb("shell", "input", "tap", str(x), str(y))
 
+    async def clear_text(self) -> None:
+        """清空当前焦点输入框内容，供 fill 的替换语义使用。
+
+        采用 MOVE_END + 连续 DEL，不依赖 CTRL+A 组合键 —— 部分 ROM/模拟器
+        (如实测的 MuMu) 的 keycombination 不携带 CTRL 修饰，会退化为单字符
+        输入反而污染输入框。空字段上的 DEL 为无操作，代价可忽略。
+        """
+        keycodes = ["123"] + ["67"] * 100
+        await self._run_adb("shell", "input", "keyevent", *keycodes)
+
     async def type_text(self, text: str) -> None:
         """安全键入文本。针对包含空格与元字符的 ASCII 序列做严格转义，防止注入。"""
         if not text:
@@ -134,25 +170,49 @@ class AndroidAdbDriver(BaseDriver):
 
         has_non_ascii = any(ord(c) > 127 for c in text)
         if has_non_ascii:
-            # Unicode / 中文文本唯一可靠通道：系统剪贴板广播 + 粘贴键码。
-            # 绝不允许静默降级到 input text —— 它会把非 ASCII 字符注入成乱码或直接丢字，
-            # 对上层 AI Agent 造成"输入成功但内容错误"的假阳性。
+            # Unicode / 中文文本唯一可靠通道：剪贴板 + 粘贴键码。
+            # 绝不允许静默降级到 input text —— 它会把非 ASCII 字符注入成乱码或直接丢字。
             safe_text = shlex.quote(text)
             try:
-                await self._run_adb("shell", f"cmd clipboard set text {safe_text}")
+                response = await self._run_adb("shell", f"cmd clipboard set text {safe_text}")
             except Exception as exc:
                 raise PhonePlaywrightError(
                     f"剪贴板写入失败，无法安全输入非 ASCII 文本 ({len(text)} 字符)",
                     suggestion="该设备可能不支持 'cmd clipboard' 广播；请安装 ADBKeyBoard 输入法或改用 ASCII 文本",
                 ) from exc
+            lowered = response.lower()
+            # 模拟器/云手机常见: rc=0 但通道未实现, 剪贴板实际未被写入。
+            # 不在此处直接报错 —— 继续尝试粘贴, 由终态校验裁决
+            # (宿主剪贴板同步型云手机仍可经宿主侧内容完成注入)。
+            unsupported = any(marker in lowered for marker in _CLIPBOARD_UNSUPPORTED_MARKERS)
             try:
                 await self._run_adb("shell", "input", "keyevent", "279")
-                return
             except Exception as exc:
                 raise PhonePlaywrightError(
                     "剪贴板已写入但粘贴键码 (KEYCODE_PASTE=279) 下发失败",
                     suggestion="请确认焦点位于可编辑输入框内，或检查设备 ROM 对 KEYCODE_PASTE 的支持",
                 ) from exc
+
+            # 终态校验: 确认文本真实落进界面树。通道失效时在此显式失败
+            # 而非静默空转 (含宿主剪贴板同步型云手机: 宿主侧需已写入相同内容)。
+            await asyncio.sleep(0.3)
+            if not await self._tree_contains_text(text):
+                if not unsupported:
+                    # 剪贴板通道正常但粘贴未生效: 补发 Ctrl+V 组合键重试
+                    try:
+                        await self._run_adb("shell", "input", "keycombination", "113", "47")
+                    except Exception:
+                        pass
+                    await asyncio.sleep(0.3)
+                if not await self._tree_contains_text(text):
+                    raise PhonePlaywrightError(
+                        "剪贴板注入后未在界面树中检测到输入文本",
+                        suggestion=(
+                            "设备剪贴板通道不可用：请安装 ADBKeyBoard 输入法、"
+                            "确认宿主剪贴板同步已开启并预先写入相同内容，或改用 ASCII 文本"
+                        ),
+                    )
+            return
 
         # 安全 ASCII 字符注入路径：严格对每个字符做输入法转义 (空格 -> %s, Shell 元字符 -> 反斜杠转义)
         tokens: list[str] = []
@@ -165,6 +225,20 @@ class AndroidAdbDriver(BaseDriver):
                 tokens.append(ch)
         escaped_arg = "".join(tokens)
         await self._run_adb("shell", "input", "text", escaped_arg)
+
+    async def _tree_contains_text(self, payload: str) -> bool:
+        """在当前无障碍原始树中检索目标文本 (用于注入终态校验)。"""
+        try:
+            tree = await self.dump_raw_tree()
+        except Exception:
+            return False
+        stack: list[RawNode] = [tree]
+        while stack:
+            node = stack.pop()
+            if (node.text and payload in node.text) or (node.desc and payload in node.desc):
+                return True
+            stack.extend(node.children)
+        return False
 
     async def swipe(self, sx: int, sy: int, ex: int, ey: int, duration_ms: int = 300) -> None:
         await self._run_adb(
