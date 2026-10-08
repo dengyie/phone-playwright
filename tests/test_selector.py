@@ -72,3 +72,27 @@ def test_id_selector_ignores_text_specificity():
     picked = selector.find_first([a, b])
 
     assert picked is a  # 保持原始顺序，不按面积重排
+
+
+def test_chained_selector_with_nth_filtering():
+    """验证链式选择器 (Chained Locators) 与 nth 过滤。"""
+    btn0 = _el("@1", "添加到购物车", 0, 0, 100, 50, role="button")
+    btn1 = _el("@2", "添加到购物车", 0, 60, 100, 110, role="button")
+    btn2 = _el("@3", "立即购买", 0, 120, 100, 170, role="button")
+    elements = [btn0, btn1, btn2]
+
+    # 1. 链式 role >> text
+    sel_buy = parse_selector("role=button >> text=立即购买")
+    assert sel_buy.find_first(elements) is btn2
+
+    # 2. 链式 role >> nth=1
+    sel_nth1 = parse_selector("role=button >> nth=1")
+    assert sel_nth1.find_first(elements) is btn1
+
+    # 3. 链式 role >> text=添加到购物车 >> nth=0
+    sel_cart_first = parse_selector("role=button >> text=添加到购物车 >> nth=0")
+    assert sel_cart_first.find_first(elements) is btn0
+
+    # 4. 越界保护
+    sel_overflow = parse_selector("role=button >> nth=99")
+    assert sel_overflow.find_first(elements) is None

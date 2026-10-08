@@ -23,7 +23,25 @@
    - 异步核心 (`async_api`) 支持高并发、单进程多设备调度。
    - 同步封装 (`sync_api`) 线程桥接，无缝支持快速脚本与交互式调试。
 
-5. **原生 Model Context Protocol (MCP) 支持**
+5. **混合 WebView CDP 穿透 (Hybrid CDP Tunneling)**
+   - 自动探测 `/proc/net/unix` 抽象套接字，自适应优先路由当前前台应用。
+   - 跨进程查询 `window.devicePixelRatio` 精确计算 DOM 元素至 Android 物理屏幕坐标。
+   - 故障屏障保证端口转发原子注销，杜绝 ADB 守护进程描述符泄漏。
+
+6. **生物力学手势与多点触控 (Biomechanical Gestures)**
+   - 三次贝塞尔曲线（Cubic Bézier）离散化模拟人体加速度与制动阻尼。
+   - 原生 `input draganddrop` 连续拖拽，消除离散抬手断流。
+   - 多指缩放（Pinch）全视口边缘边界夹紧（Margin $\ge 10\text{px}$）。
+
+7. **流式时序 Trace 录制器 (Playwright Tracing)**
+   - 捕获动作耗时、点击热区、失败事件（`{verb}_failed`）与 DOM/Accessibility 快照。
+   - SHA-256 内容寻址资源库，生成标准免解压可读的 `trace.zip`。
+
+8. **Set-of-Mark (SoM) 视觉锚定与链式选择器**
+   - 自动计算对比度适配多模态模型视觉标记（Tag ID）。
+   - 原生支持链式定位管道（`header >> button`）与索引过滤（`first()`, `last()`, `nth()`）。
+
+9. **原生 Model Context Protocol (MCP) 支持**
    - 提供标准 STDIO JSON-RPC 2.0 服务端。
    - 暴露 `phone_list_devices`、`phone_inspect_screen`、`phone_interact` 工具，供 ZCode、Claude Code、Cursor 等直接接入驱动真实手机。
 

@@ -18,6 +18,7 @@ from phone_playwright.api.async_api import (
     AsyncPhonePage,
 )
 from phone_playwright.core.locator import PhoneLocator
+from phone_playwright.core.assertions import expect, AsyncExpect, SyncExpect
 from phone_playwright.models.geometry import Rect
 from phone_playwright.models.schema import CompactElement, PageSnapshot
 from phone_playwright.models.actions import ActionResult
@@ -44,6 +45,9 @@ __all__ = [
     "CompactElement",
     "PageSnapshot",
     "ActionResult",
+    "expect",
+    "AsyncExpect",
+    "SyncExpect",
     "PhonePlaywrightError",
     "DeviceOfflineError",
     "ActionabilityTimeoutError",

@@ -208,14 +208,15 @@ class AndroidAdbDriver(BaseDriver):
     async def tap(self, x: int, y: int) -> None:
         await self._run_adb("shell", "input", "tap", str(x), str(y))
 
-    async def clear_text(self) -> None:
+    async def clear_text(self, count: int = 150) -> None:
         """清空当前焦点输入框内容，供 fill 的替换语义使用。
 
         采用 MOVE_END + 连续 DEL，不依赖 CTRL+A 组合键 —— 部分 ROM/模拟器
         (如实测的 MuMu) 的 keycombination 不携带 CTRL 修饰，会退化为单字符
         输入反而污染输入框。空字段上的 DEL 为无操作，代价可忽略。
         """
-        keycodes = ["123"] + ["67"] * 100
+        batch_size = min(max(count, 50), 200)
+        keycodes = ["123"] + ["67"] * batch_size
         await self._run_adb("shell", "input", "keyevent", *keycodes)
 
     async def type_text(self, text: str) -> None:
@@ -263,8 +264,6 @@ class AndroidAdbDriver(BaseDriver):
             )
 
         # 安全 ASCII 字符注入路径：严格对每个字符做输入法转义 (空格 -> %s, Shell 元字符 -> 反斜杠转义)
-
-        # 安全 ASCII 字符注入路径：严格对每个字符做输入法转义 (空格 -> %s, Shell 元字符 -> 反斜杠转义)
         tokens: list[str] = []
         for ch in text:
             if ch == " ":
@@ -294,6 +293,17 @@ class AndroidAdbDriver(BaseDriver):
         await self._run_adb(
             "shell", "input", "swipe", str(sx), str(sy), str(ex), str(ey), str(duration_ms)
         )
+
+    async def drag_and_drop(self, sx: int, sy: int, ex: int, ey: int, duration_ms: int = 800) -> None:
+        """物理长按拖拽 (优先 Android 8+ input draganddrop，单手势不抬手)。"""
+        try:
+            await self._run_adb(
+                "shell", "input", "draganddrop", str(sx), str(sy), str(ex), str(ey), str(duration_ms)
+            )
+        except Exception:
+            await self._run_adb(
+                "shell", "input", "swipe", str(sx), str(sy), str(ex), str(ey), str(duration_ms)
+            )
 
     async def long_press(self, x: int, y: int, duration_ms: int = 800) -> None:
         """物理长按绝对像素坐标 (基于原地微小滑动模拟长按)。"""

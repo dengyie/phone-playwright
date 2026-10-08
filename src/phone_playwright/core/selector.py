@@ -57,15 +57,79 @@ class Selector:
                 best, best_score = el, score
         return best
 
+    def find_all(self, elements: list[CompactElement]) -> list[CompactElement]:
+        """返回所有匹配的元素集合。"""
+        return [el for el in elements if self.match(el)]
+
     def __str__(self) -> str:
         return self.raw
 
 
 def parse_selector(selector_str: str) -> Selector:
-    """将选择器字符串解析为可执行匹配器。"""
+    """将选择器字符串解析为可执行匹配器，全面支持复合管道链式选择器 (>>) 与 nth 索引。"""
     s = selector_str.strip()
 
-    # 1. 匹配 @ref: '@1', '@12'
+    # 处理链式复合选择器: "role=list >> text=商品" 或 "role=button >> nth=1"
+    if " >> " in s:
+        parts = [p.strip() for p in s.split(" >> ") if p.strip()]
+        if len(parts) > 1:
+            selectors = [parse_selector(p) for p in parts]
+
+            def chained_match(el: CompactElement) -> bool:
+                # 对于复合选择器，最末级子选择器必须匹配
+                return selectors[-1].match(el)
+
+            chained_sel = Selector(raw=s, matcher=chained_match)
+
+            def chained_find_first(elements: list[CompactElement]) -> CompactElement | None:
+                current_pool = list(elements)
+                for sub_sel in selectors:
+                    # 检查是否为 nth 伪类选择器
+                    if sub_sel.raw.startswith("nth="):
+                        try:
+                            idx = int(sub_sel.raw.split("=", 1)[1].strip())
+                            if 0 <= idx < len(current_pool):
+                                current_pool = [current_pool[idx]]
+                            elif idx < 0 and abs(idx) <= len(current_pool):
+                                current_pool = [current_pool[idx]]
+                            else:
+                                return None
+                        except ValueError:
+                            return None
+                    else:
+                        matched = sub_sel.find_all(current_pool)
+                        if not matched:
+                            return None
+                        current_pool = matched
+                return current_pool[0] if current_pool else None
+
+            def chained_find_all(elements: list[CompactElement]) -> list[CompactElement]:
+                current_pool = list(elements)
+                for sub_sel in selectors:
+                    if sub_sel.raw.startswith("nth="):
+                        try:
+                            idx = int(sub_sel.raw.split("=", 1)[1].strip())
+                            if 0 <= idx < len(current_pool):
+                                current_pool = [current_pool[idx]]
+                            elif idx < 0 and abs(idx) <= len(current_pool):
+                                current_pool = [current_pool[idx]]
+                            else:
+                                return []
+                        except ValueError:
+                            return []
+                    else:
+                        current_pool = sub_sel.find_all(current_pool)
+                return current_pool
+
+            chained_sel.find_first = chained_find_first  # type: ignore[assignment]
+            chained_sel.find_all = chained_find_all      # type: ignore[assignment]
+            return chained_sel
+
+    # 1. 匹配 nth=xxx
+    if s.startswith("nth="):
+        return Selector(raw=s, matcher=lambda el: True)
+
+    # 2. 匹配 @ref: '@1', '@12'
     if s.startswith("@"):
         target_ref = s
         return Selector(
@@ -73,7 +137,7 @@ def parse_selector(selector_str: str) -> Selector:
             matcher=lambda el: el.ref == target_ref,
         )
 
-    # 2. 匹配 id=xxx 或 resource-id=xxx
+    # 3. 匹配 id=xxx 或 resource-id=xxx
     if s.startswith("id=") or s.startswith("resource-id="):
         target_id = s.split("=", 1)[1].strip().strip('"').strip("'")
         return Selector(
@@ -81,7 +145,7 @@ def parse_selector(selector_str: str) -> Selector:
             matcher=lambda el: el.resource_id == target_id,
         )
 
-    # 3. 匹配 text=xxx 或 exact:text=xxx
+    # 4. 匹配 text=xxx 或 exact:text=xxx
     if s.startswith("exact:text="):
         target_text = s.split("=", 1)[1].strip().strip('"').strip("'")
         return Selector(
@@ -98,7 +162,7 @@ def parse_selector(selector_str: str) -> Selector:
             substring_text=target_text,
         )
 
-    # 4. 匹配 role=xxx[name=yyy] 或 role=xxx
+    # 5. 匹配 role=xxx[name=yyy] 或 role=xxx
     role_pattern = re.compile(r"^role=([a-zA-Z]+)(?:\[name=([^\]]+)\])?$")
     role_match = role_pattern.match(s)
     if role_match:
@@ -115,7 +179,7 @@ def parse_selector(selector_str: str) -> Selector:
             matcher=lambda el: el.role == role_name,
         )
 
-    # 5. 默认行为：宽松子串文本匹配
+    # 6. 默认行为：宽松子串文本匹配
     fallback_text = s.strip('"').strip("'")
     return Selector(
         raw=s,

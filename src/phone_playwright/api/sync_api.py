@@ -13,10 +13,52 @@ from phone_playwright.api.async_api import (
     AsyncPhoneDevice,
     AsyncPhonePage,
 )
+from phone_playwright.core.cdp import WebFrameLocator, WebPhoneLocator
+from phone_playwright.tracing.recorder import SyncTraceRecorder
 from phone_playwright.models.schema import PageSnapshot
 from phone_playwright.models.actions import ActionResult
 
 T = TypeVar("T")
+
+
+class SyncWebPhoneLocator:
+    """同步 Web DOM 定位器。"""
+
+    def __init__(self, async_locator: WebPhoneLocator, loop_thread: SyncEventLoopThread) -> None:
+        self._async = async_locator
+        self._loop_thread = loop_thread
+
+    def click(self, timeout_s: float = 5.0) -> ActionResult:
+        return self._loop_thread.run(self._async.click(timeout_s=timeout_s))
+
+    def fill(self, text: str, timeout_s: float = 5.0) -> ActionResult:
+        return self._loop_thread.run(self._async.fill(text=text, timeout_s=timeout_s))
+
+    def text_content(self, timeout_s: float = 5.0) -> str | None:
+        return self._loop_thread.run(self._async.text_content(timeout_s=timeout_s))
+
+
+class SyncWebFrameLocator:
+    """同步 WebFrame 定位器。"""
+
+    def __init__(self, async_frame: WebFrameLocator, loop_thread: SyncEventLoopThread) -> None:
+        self._async = async_frame
+        self._loop_thread = loop_thread
+
+    def locator(self, css_or_xpath: str) -> SyncWebPhoneLocator:
+        return SyncWebPhoneLocator(self._async.locator(css_or_xpath), self._loop_thread)
+
+    def title(self) -> str:
+        return self._loop_thread.run(self._async.title())
+
+    def url(self) -> str:
+        return self._loop_thread.run(self._async.url())
+
+    def evaluate(self, expression: str) -> Any:
+        return self._loop_thread.run(self._async.evaluate(expression))
+
+    def close(self) -> None:
+        self._loop_thread.run(self._async.close())
 
 
 class SyncEventLoopThread:
@@ -71,6 +113,24 @@ class SyncPhoneLocator:
         coro = self._async_page.locator(self._selector).wait_for(state=state, timeout_s=timeout_s)
         return self._loop_thread.run(coro)
 
+    def drag_to(
+        self,
+        target: SyncPhoneLocator,
+        duration_ms: int = 600,
+        press_duration_ms: int = 300,
+        steps: int = 25,
+        timeout_s: float = 5.0,
+    ) -> ActionResult:
+        target_async = self._async_page.locator(target.selector)
+        coro = self._async_page.locator(self._selector).drag_to(
+            target=target_async,
+            duration_ms=duration_ms,
+            press_duration_ms=press_duration_ms,
+            steps=steps,
+            timeout_s=timeout_s,
+        )
+        return self._loop_thread.run(coro)
+
     def scroll_into_view(
         self,
         max_swipes: int = 5,
@@ -101,6 +161,14 @@ class SyncPhoneLocator:
         coro = self._async_page.locator(self._selector).bounding_box()
         return self._loop_thread.run(coro)
 
+    def is_enabled(self) -> bool:
+        coro = self._async_page.locator(self._selector).is_enabled()
+        return self._loop_thread.run(coro)
+
+    def is_disabled(self) -> bool:
+        coro = self._async_page.locator(self._selector).is_disabled()
+        return self._loop_thread.run(coro)
+
 
 class SyncPhonePage:
     """同步页面操作实例。"""
@@ -108,6 +176,7 @@ class SyncPhonePage:
     def __init__(self, async_page: AsyncPhonePage, loop_thread: SyncEventLoopThread) -> None:
         self._async = async_page
         self._loop_thread = loop_thread
+        self.tracing = SyncTraceRecorder(async_page.tracing, loop_thread)
 
     def __call__(self) -> SyncPhonePage:
         """支持 device.current_page() 函数式调用习惯。"""
@@ -117,11 +186,15 @@ class SyncPhonePage:
         self,
         use_vision_fallback: bool = False,
         include_screenshot: bool = False,
+        include_som_image: bool = False,
+        som_palette: dict[str, str] | None = None,
     ) -> PageSnapshot:
         return self._loop_thread.run(
             self._async.snapshot(
                 use_vision_fallback=use_vision_fallback,
                 include_screenshot=include_screenshot,
+                include_som_image=include_som_image,
+                som_palette=som_palette,
             )
         )
 
@@ -146,11 +219,38 @@ class SyncPhonePage:
     def get_by_test_id(self, test_id: str) -> SyncPhoneLocator:
         return self.locator(f"id={test_id}")
 
+    def frame_locator(self, selector: str = "role=scrollable") -> SyncWebFrameLocator:
+        async_frame = self._async.frame_locator(selector)
+        return SyncWebFrameLocator(async_frame=async_frame, loop_thread=self._loop_thread)
+
     def dump_raw_tree(self) -> Any:
         return self._loop_thread.run(self._async.dump_raw_tree())
 
     def swipe(self, *args: Any, **kwargs: Any) -> None:
         self._loop_thread.run(self._async.swipe(*args, **kwargs))
+
+    def pinch_out(
+        self,
+        center: tuple[int, int] | None = None,
+        scale: float = 2.0,
+        duration_ms: int = 400,
+    ) -> None:
+        self._loop_thread.run(self._async.pinch_out(center=center, scale=scale, duration_ms=duration_ms))
+
+    def pinch_in(
+        self,
+        center: tuple[int, int] | None = None,
+        scale: float = 0.5,
+        duration_ms: int = 400,
+    ) -> None:
+        self._loop_thread.run(self._async.pinch_in(center=center, scale=scale, duration_ms=duration_ms))
+
+    def swipe_path(
+        self,
+        points: list[tuple[int, int]],
+        duration_ms: int = 800,
+    ) -> None:
+        self._loop_thread.run(self._async.swipe_path(points=points, duration_ms=duration_ms))
 
     def press_key(self, key: str | int) -> None:
         self._loop_thread.run(self._async.press_key(key))
@@ -169,6 +269,7 @@ class SyncPhoneDevice:
         self._async = async_device
         self._loop_thread = loop_thread
         self._page = SyncPhonePage(async_page=async_device.current_page, loop_thread=loop_thread)
+        self.tracing = SyncTraceRecorder(async_recorder=async_device.tracing, loop_thread=loop_thread)
 
     @property
     def current_page(self) -> SyncPhonePage:
@@ -190,14 +291,21 @@ class SyncPhoneDevice:
     def get_by_test_id(self, test_id: str) -> SyncPhoneLocator:
         return self._page.get_by_test_id(test_id)
 
+    def frame_locator(self, selector: str = "role=scrollable") -> SyncWebFrameLocator:
+        return self._page.frame_locator(selector)
+
     def snapshot(
         self,
         use_vision_fallback: bool = False,
         include_screenshot: bool = False,
+        include_som_image: bool = False,
+        som_palette: dict[str, str] | None = None,
     ) -> PageSnapshot:
         return self._page.snapshot(
             use_vision_fallback=use_vision_fallback,
             include_screenshot=include_screenshot,
+            include_som_image=include_som_image,
+            som_palette=som_palette,
         )
 
     def dump_raw_tree(self) -> Any:
@@ -205,6 +313,29 @@ class SyncPhoneDevice:
 
     def swipe(self, *args: Any, **kwargs: Any) -> None:
         self._page.swipe(*args, **kwargs)
+
+    def pinch_out(
+        self,
+        center: tuple[int, int] | None = None,
+        scale: float = 2.0,
+        duration_ms: int = 400,
+    ) -> None:
+        self._page.pinch_out(center=center, scale=scale, duration_ms=duration_ms)
+
+    def pinch_in(
+        self,
+        center: tuple[int, int] | None = None,
+        scale: float = 0.5,
+        duration_ms: int = 400,
+    ) -> None:
+        self._page.pinch_in(center=center, scale=scale, duration_ms=duration_ms)
+
+    def swipe_path(
+        self,
+        points: list[tuple[int, int]],
+        duration_ms: int = 800,
+    ) -> None:
+        self._page.swipe_path(points=points, duration_ms=duration_ms)
 
     def press_back(self) -> None:
         self._page.press_back()

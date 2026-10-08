@@ -14,6 +14,10 @@ from phone_playwright.core.pruner import SemanticPruner
 from phone_playwright.core.state_machine import ActionabilityEngine
 from phone_playwright.core.locator import PhoneLocator
 from phone_playwright.core.vision import RapidOcrFallbackProvider
+from phone_playwright.core.som import SetOfMarkRenderer
+from phone_playwright.core.gesture import GestureEngine
+from phone_playwright.core.cdp import WebFrameLocator
+from phone_playwright.tracing.recorder import TraceRecorder
 from phone_playwright.models.schema import PageSnapshot
 from phone_playwright.fleet.manager import FleetManager
 
@@ -21,11 +25,23 @@ from phone_playwright.fleet.manager import FleetManager
 class AsyncPhonePage:
     """当前移动设备屏幕页面操作实例。"""
 
-    def __init__(self, driver: BaseDriver, pruner: SemanticPruner) -> None:
+    def __init__(
+        self,
+        driver: BaseDriver,
+        pruner: SemanticPruner,
+        tracing: TraceRecorder | None = None,
+    ) -> None:
         self.driver = driver
         self.pruner = pruner
-        self.action_engine = ActionabilityEngine(driver=driver, pruner=pruner)
+        self.tracing = tracing or TraceRecorder(driver=driver)
+        self.action_engine = ActionabilityEngine(
+            driver=driver,
+            pruner=pruner,
+            trace_recorder=self.tracing,
+        )
         self.vision_fallback = RapidOcrFallbackProvider()
+        self.som_renderer = SetOfMarkRenderer()
+        self.gesture_engine = GestureEngine(driver=driver)
 
     def __call__(self) -> AsyncPhonePage:
         """支持 device.current_page() 函数式调用习惯。"""
@@ -35,11 +51,14 @@ class AsyncPhonePage:
         self,
         use_vision_fallback: bool = False,
         include_screenshot: bool = False,
+        include_som_image: bool = False,
+        som_palette: dict[str, str] | None = None,
     ) -> PageSnapshot:
         """拉取当前屏幕视口内的紧凑无障碍语义快照。
 
         若提取到的无障碍元素极度稀疏 (<= 2) 或调用方显式指定，自动触发视觉 OCR 兜底补充。
         若 include_screenshot 为 True，抓取截图并填充 screenshot_base64 字段。
+        若 include_som_image 为 True，生成 Set-of-Mark 标注图并填充 annotated_screenshot_base64 字段。
         """
         vw, vh = await self.driver.get_viewport_size()
         raw_tree = await self.driver.dump_raw_tree()
@@ -57,14 +76,29 @@ class AsyncPhonePage:
             except Exception:
                 pass
 
-        screenshot_b64: str | None = None
-        if include_screenshot:
+        need_screenshot = include_screenshot or include_som_image
+        if need_screenshot and shot_bytes is None:
             try:
-                if shot_bytes is None:
-                    shot_bytes = await self.driver.take_screenshot()
-                screenshot_b64 = base64.b64encode(shot_bytes).decode("ascii")
+                shot_bytes = await self.driver.take_screenshot()
             except Exception:
                 pass
+
+        screenshot_b64: str | None = None
+        annotated_b64: str | None = None
+        if shot_bytes is not None:
+            if include_screenshot:
+                screenshot_b64 = base64.b64encode(shot_bytes).decode("ascii")
+            if include_som_image:
+                try:
+                    annotated_b64 = self.som_renderer.render_som_base64(
+                        image_bytes=shot_bytes,
+                        elements=elements,
+                        viewport_width=vw,
+                        viewport_height=vh,
+                        palette_override=som_palette,
+                    )
+                except Exception:
+                    pass
 
         # 为紧随其后的即时 locator 交互预热缓存 (TTL 1.0s)
         self.action_engine.warm_cache(elements, time.monotonic())
@@ -78,6 +112,7 @@ class AsyncPhonePage:
             viewport_height=vh,
             elements=elements,
             screenshot_base64=screenshot_b64,
+            annotated_screenshot_base64=annotated_b64,
         )
 
     def locator(self, selector: str) -> PhoneLocator:
@@ -97,6 +132,10 @@ class AsyncPhonePage:
     def get_by_test_id(self, test_id: str) -> PhoneLocator:
         """快捷定位器: 按资源 ID / 测试 ID 定位。"""
         return self.locator(f"id={test_id}")
+
+    def frame_locator(self, selector: str = "role=scrollable") -> WebFrameLocator:
+        """根据原生选择器定位内嵌 WebView 容器，并返回内嵌 Web 树定位器。"""
+        return WebFrameLocator(page=self, container_selector=selector)
 
     async def screenshot(self) -> bytes:
         """抓取物理屏幕图像数据。"""
@@ -148,6 +187,41 @@ class AsyncPhonePage:
         else:
             raise ValueError(f"不支持的滑动方向: {resolved_dir}")
 
+    async def pinch_out(
+        self,
+        center: tuple[int, int] | None = None,
+        scale: float = 2.0,
+        duration_ms: int = 400,
+    ) -> None:
+        """双指张开 (放大): 两指从中心向外平滑对称滑动。"""
+        self.action_engine.invalidate_cache()
+        if center is None:
+            vw, vh = await self.driver.get_viewport_size()
+            center = (vw // 2, vh // 2)
+        await self.gesture_engine.pinch(center=center, scale=scale, duration_ms=duration_ms)
+
+    async def pinch_in(
+        self,
+        center: tuple[int, int] | None = None,
+        scale: float = 0.5,
+        duration_ms: int = 400,
+    ) -> None:
+        """双指捏合 (缩小): 两指从外侧向中心平滑对称滑动。"""
+        self.action_engine.invalidate_cache()
+        if center is None:
+            vw, vh = await self.driver.get_viewport_size()
+            center = (vw // 2, vh // 2)
+        await self.gesture_engine.pinch(center=center, scale=scale, duration_ms=duration_ms)
+
+    async def swipe_path(
+        self,
+        points: list[tuple[int, int]],
+        duration_ms: int = 800,
+    ) -> None:
+        """多点折线连续手势 (如九宫格锁屏、复杂滑块拼图)。"""
+        self.action_engine.invalidate_cache()
+        await self.gesture_engine.swipe_path(points=points, duration_ms=duration_ms)
+
     async def press_key(self, key: str | int) -> None:
         """模拟物理或系统按键。"""
         self.action_engine.invalidate_cache()
@@ -170,7 +244,12 @@ class AsyncPhoneDevice:
     def __init__(self, driver: BaseDriver) -> None:
         self.driver = driver
         self.pruner = SemanticPruner()
-        self._current_page = AsyncPhonePage(driver=driver, pruner=self.pruner)
+        self.tracing = TraceRecorder(driver=driver)
+        self._current_page = AsyncPhonePage(
+            driver=driver,
+            pruner=self.pruner,
+            tracing=self.tracing,
+        )
 
     @property
     def current_page(self) -> AsyncPhonePage:
@@ -192,14 +271,21 @@ class AsyncPhoneDevice:
     def get_by_test_id(self, test_id: str) -> PhoneLocator:
         return self._current_page.get_by_test_id(test_id)
 
+    def frame_locator(self, selector: str = "role=scrollable") -> WebFrameLocator:
+        return self._current_page.frame_locator(selector)
+
     async def snapshot(
         self,
         use_vision_fallback: bool = False,
         include_screenshot: bool = False,
+        include_som_image: bool = False,
+        som_palette: dict[str, str] | None = None,
     ) -> PageSnapshot:
         return await self._current_page.snapshot(
             use_vision_fallback=use_vision_fallback,
             include_screenshot=include_screenshot,
+            include_som_image=include_som_image,
+            som_palette=som_palette,
         )
 
     async def swipe(
@@ -208,6 +294,29 @@ class AsyncPhoneDevice:
         distance_ratio: float = 0.5,
     ) -> None:
         await self._current_page.swipe(direction=direction, distance_ratio=distance_ratio)
+
+    async def pinch_out(
+        self,
+        center: tuple[int, int] | None = None,
+        scale: float = 2.0,
+        duration_ms: int = 400,
+    ) -> None:
+        await self._current_page.pinch_out(center=center, scale=scale, duration_ms=duration_ms)
+
+    async def pinch_in(
+        self,
+        center: tuple[int, int] | None = None,
+        scale: float = 0.5,
+        duration_ms: int = 400,
+    ) -> None:
+        await self._current_page.pinch_in(center=center, scale=scale, duration_ms=duration_ms)
+
+    async def swipe_path(
+        self,
+        points: list[tuple[int, int]],
+        duration_ms: int = 800,
+    ) -> None:
+        await self._current_page.swipe_path(points=points, duration_ms=duration_ms)
 
     async def press_back(self) -> None:
         await self._current_page.press_back()

@@ -23,6 +23,8 @@ from phone_playwright.core.selector import parse_selector
 if TYPE_CHECKING:
     from phone_playwright.drivers.base import BaseDriver
     from phone_playwright.core.pruner import SemanticPruner
+    from phone_playwright.tracing.recorder import TraceRecorder
+    from phone_playwright.models.schema import PageSnapshot
 
 
 class ActionabilityEngine:
@@ -34,11 +36,13 @@ class ActionabilityEngine:
         pruner: SemanticPruner,
         poll_interval_s: float = 0.1,
         stable_sample_count: int = 1,
+        trace_recorder: TraceRecorder | None = None,
     ) -> None:
         self.driver = driver
         self.pruner = pruner
         self.poll_interval_s = poll_interval_s
         self.stable_sample_count = stable_sample_count
+        self.trace_recorder = trace_recorder
         self._cached_elements: list[CompactElement] | None = None
         self._cached_timestamp: float = 0.0
 
@@ -84,6 +88,14 @@ class ActionabilityEngine:
                 target_el = selector.find_first(elements)
                 if not target_el or not target_el.bounds.intersects(viewport):
                     elapsed_ms = int((time.monotonic() - start_time) * 1000)
+                    if self.trace_recorder and self.trace_recorder.is_recording:
+                        await self.trace_recorder.record_action(
+                            name="wait_for",
+                            selector=selector_str,
+                            duration_ms=elapsed_ms,
+                            click_point=None,
+                            metadata={"state": "hidden", "target": selector_str},
+                        )
                     return ActionResult(
                         success=True,
                         verb="wait_for",
@@ -150,6 +162,14 @@ class ActionabilityEngine:
 
             # 针对 wait_for(state="visible")：元素稳定即可返回
             if verb == "wait_for":
+                if self.trace_recorder and self.trace_recorder.is_recording:
+                    await self.trace_recorder.record_action(
+                        name="wait_for",
+                        selector=selector_str,
+                        duration_ms=elapsed_ms,
+                        click_point=None,
+                        metadata={"state": "visible", "target": selector_str},
+                    )
                 return ActionResult(
                     success=True,
                     verb="wait_for",
@@ -163,8 +183,27 @@ class ActionabilityEngine:
             cx, cy = click_bounds.center
             self.invalidate_cache()
 
+            snapshot_before: PageSnapshot | None = None
+            if self.trace_recorder and self.trace_recorder.is_recording and self.trace_recorder.record_snapshots:
+                from phone_playwright.models.schema import PageSnapshot
+                snapshot_before = PageSnapshot(
+                    timestamp=time.time(),
+                    device_id=self.driver.device_id,
+                    viewport_width=vw,
+                    viewport_height=vh,
+                    elements=cur_elements,
+                )
+
             if verb == "click":
                 await self.driver.tap(cx, cy)
+                if self.trace_recorder and self.trace_recorder.is_recording:
+                    await self.trace_recorder.record_action(
+                        name="click",
+                        selector=selector_str,
+                        duration_ms=elapsed_ms,
+                        click_point=(cx, cy),
+                        snapshot_before=snapshot_before,
+                    )
                 return ActionResult(
                     success=True,
                     verb="click",
@@ -185,6 +224,15 @@ class ActionabilityEngine:
                         pass
                 text_to_type = value or ""
                 await self.driver.type_text(text_to_type)
+                if self.trace_recorder and self.trace_recorder.is_recording:
+                    await self.trace_recorder.record_action(
+                        name="fill",
+                        selector=selector_str,
+                        duration_ms=elapsed_ms,
+                        click_point=(cx, cy),
+                        snapshot_before=snapshot_before,
+                        metadata={"text": text_to_type},
+                    )
                 return ActionResult(
                     success=True,
                     verb="fill",
@@ -195,6 +243,15 @@ class ActionabilityEngine:
             elif verb == "hover":
                 # 触发长按 / 悬浮
                 await self.driver.long_press(cx, cy, duration_ms=duration_ms)
+                if self.trace_recorder and self.trace_recorder.is_recording:
+                    await self.trace_recorder.record_action(
+                        name="hover",
+                        selector=selector_str,
+                        duration_ms=elapsed_ms,
+                        click_point=(cx, cy),
+                        snapshot_before=snapshot_before,
+                        metadata={"duration_ms": duration_ms},
+                    )
                 return ActionResult(
                     success=True,
                     verb="hover",
@@ -206,22 +263,37 @@ class ActionabilityEngine:
                 raise ValueError(f"不支持的动作动词: {verb}")
 
         # 最终超时后，精确定位超时原因 (包含异常屏障，防止末尾瞬态异常冲垮核心超时断言)
+        elapsed_ms = int((time.monotonic() - start_time) * 1000)
+        failure_error: Exception | None = None
         try:
             raw_tree = await self.driver.dump_raw_tree()
             # 使用极大虚拟视口蒸馏未裁剪的完整节点树，精准区分【未挂载】与【屏幕外】
             unclipped_elements = self.pruner.prune_and_distill(raw_tree, 1000000, 1000000)
             target_node = selector.find_first(unclipped_elements)
             if not target_node:
-                raise SelectorNotFoundError(selector_str)
-            if not target_node.bounds.intersects(viewport):
-                raise OffscreenElementError(selector_str)
-        except (OffscreenElementError, SelectorNotFoundError):
-            raise
+                failure_error = SelectorNotFoundError(selector_str)
+            elif not target_node.bounds.intersects(viewport):
+                failure_error = OffscreenElementError(selector_str)
+        except (OffscreenElementError, SelectorNotFoundError) as e:
+            failure_error = e
         except Exception:
             pass
 
-        raise ActionabilityTimeoutError(
-            selector=selector_str,
-            timeout_s=timeout_s,
-            details=f"目标未能在规定时间内稳定就绪 (stable_hits={stable_hits})",
-        )
+        if failure_error is None:
+            failure_error = ActionabilityTimeoutError(
+                selector=selector_str,
+                timeout_s=timeout_s,
+                details=f"目标未能在规定时间内稳定就绪 (stable_hits={stable_hits})",
+            )
+
+        if self.trace_recorder and self.trace_recorder.is_recording:
+            await self.trace_recorder.record_action(
+                name=f"{verb}_failed",
+                selector=selector_str,
+                duration_ms=elapsed_ms,
+                click_point=None,
+                error=str(failure_error),
+                metadata={"error_type": type(failure_error).__name__},
+            )
+
+        raise failure_error

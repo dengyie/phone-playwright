@@ -66,6 +66,59 @@ class PhoneLocator:
             expected_state=state,
         )
 
+    async def drag_to(
+        self,
+        target: PhoneLocator,
+        duration_ms: int = 600,
+        press_duration_ms: int = 300,
+        steps: int = 25,
+        timeout_s: float = 5.0,
+    ) -> ActionResult:
+        """从当前元素中心点平滑拖拽至目标元素中心点。
+
+        对齐规格书: docs/specs/04-gesture-engine.md
+        1. 自动等待当前元素与目标元素 visible;
+        2. 计算源和目标中心像素坐标;
+        3. 调用 GestureEngine 进行拟人化三阶贝塞尔拖拽;
+        4. 使温热缓存失效。
+        """
+        await self.wait_for(state="visible", timeout_s=timeout_s)
+        await target.wait_for(state="visible", timeout_s=timeout_s)
+
+        src_box = await self.bounding_box()
+        dst_box = await target.bounding_box()
+        if src_box is None or dst_box is None:
+            raise RuntimeError(f"drag_to 失败: 无法获取元素视口边界 (src={src_box}, dst={dst_box})")
+
+        p_src = (src_box["x"] + src_box["width"] // 2, src_box["y"] + src_box["height"] // 2)
+        p_dst = (dst_box["x"] + dst_box["width"] // 2, dst_box["y"] + dst_box["height"] // 2)
+
+        await self._page.gesture_engine.drag_to(
+            source_point=p_src,
+            target_point=p_dst,
+            duration_ms=duration_ms,
+            press_duration_ms=press_duration_ms,
+            steps=steps,
+        )
+        self._page.action_engine.invalidate_cache()
+
+        elapsed_ms = duration_ms + press_duration_ms
+        if self._page.tracing and self._page.tracing.is_recording:
+            await self._page.tracing.record_action(
+                name="drag_to",
+                selector=self._selector,
+                duration_ms=elapsed_ms,
+                click_point=p_src,
+                metadata={"target_selector": target.selector, "target_point": {"x": p_dst[0], "y": p_dst[1]}},
+            )
+
+        return ActionResult(
+            verb="drag_to",
+            target=self._selector,
+            success=True,
+            time_taken_ms=elapsed_ms,
+        )
+
     async def _resolve_elements(self, force_refresh: bool = False) -> tuple[list[CompactElement], Rect]:
         """获取当前视口的元素列表与视口区域，优先复用 1.0s 内的快照/可用性引擎温热缓存。"""
         vw, vh = await self._page.driver.get_viewport_size()
@@ -141,4 +194,35 @@ class PhoneLocator:
             return None
         except Exception:
             return None
+
+    async def is_enabled(self) -> bool:
+        """检查元素是否处于使能可用状态。"""
+        try:
+            elements, _ = await self._resolve_elements()
+            target = parse_selector(self._selector).find_first(elements)
+            return bool(target and target.enabled)
+        except Exception:
+            return False
+
+    async def is_disabled(self) -> bool:
+        """检查元素是否处于禁用置灰状态。"""
+        return not (await self.is_enabled())
+
+    def locator(self, sub_selector: str) -> PhoneLocator:
+        """链式子定位器 (Chained Locators)。在当前定位器的语义作用域内继续匹配子元素。"""
+        combined = f"{self._selector} >> {sub_selector}"
+        return PhoneLocator(page=self._page, selector=combined)
+
+    def nth(self, index: int) -> PhoneLocator:
+        """获取匹配列表中的第 n 个元素 (0-based 索引)。"""
+        combined = f"{self._selector} >> nth={index}"
+        return PhoneLocator(page=self._page, selector=combined)
+
+    def first(self) -> PhoneLocator:
+        """获取首个匹配元素。"""
+        return self.nth(0)
+
+    def last(self) -> PhoneLocator:
+        """获取末尾匹配元素。"""
+        return self.nth(-1)
 
